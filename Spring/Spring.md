@@ -7213,35 +7213,156 @@ public class MyAnnotationConfigWebApplicationContext extends AnnotationConfigWeb
 
 ## 3. 消除web.xml
 
+目前，几乎消除了配置文件，但是web工程的入口还是使用的web.xml进行配置的，如下
+
+```xml
+<!--配置springMVC前端控制器-->
+<servlet>
+    <servlet-name>DispatcherServlet</servlet-name>
+    <servlet-class>org.springframework.web.servlet.DispatcherServlet</servlet-class>
+    <!--指定springMVC的applicationContext全限定名 -->
+    <init-param>
+        <param-name>contextClass</param-name>
+        <param-value>com.itheima.config.MyAnnotationConfigWebApplicationContext</param-value>
+    </init-param>
+    <!--服务器启动就创建-->
+    <load-on-startup>2</load-on-startup>
+</servlet>
+<servlet-mapping>
+    <servlet-name>DispatcherServlet</servlet-name>
+    <url-pattern>/</url-pattern>
+</servlet-mapping>
+```
+
+<br>
+
+- Servlet3.0环境中，web容器提供了`javax.servlet.ServletContainerInitializer`接口，实现了该接口后，在 应的类加载路径的META-INF/services 目录创建一个名为`javax.servlet.ServletContainerInitializer`的文件， 文件内容指定具体的`ServletContainerInitializer`实现类，那么，当web容器启动时就会运行这个初始化器做 一些组件内的初始化工作；  
+- 基于这个特性，Spring就定义了一个`SpringServletContainerInitializer`实现了`ServletContainerInitializer`接口; 
+- 而 `SpringServletContainerInitializer` 会查找实现了 `WebApplicationInitializer` 的类，Spring又提供了一个 `WebApplicationInitializer`的基础实现类 `AbstractAnnotationConfigDispatcherServletInitializer` ，当我们 编写类继承`AbstractAnnotationConfigDispatcherServletInitializer`时，容器就会自动发现我们自己的类， 在该类中我们就可以配置Spring和SpringMVC的入口了。
+
+<br>
+
+按照下面的配置就可以完全省略web.xml
+
+```java
+public class MyAnnotationConfigDispatcherServletInitializer extends 	AbstractAnnotationConfigDispatcherServletInitializer {
+    //返回的带有@Configuration注解的类用来配置ContextLoaderListener
+    protected Class<?>[] getRootConfigClasses() {
+        System.out.println("加载核心配置类创建ContextLoaderListener");
+        return new Class[]{ApplicationContextConfig.class};
+    }
+    //返回的带有@Configuration注解的类用来配置DispatcherServlet
+    protected Class<?>[] getServletConfigClasses() {
+        System.out.println("加载核心配置类创建DispatcherServlet");
+        return new Class[]{SpringMVCConfig.class};
+    }
+    //将一个或多个路径映射到DispatcherServlet上
+    protected String[] getServletMappings() {
+    	return new String[]{"/"};
+    }
+}
+```
 
 
 
+# 十四、SpringMVC的组件原理剖析
 
 
 
+## 1. 前端控制器初始化
+
+前端控制器DispatcherServlet是SpringMVC的入口，也是SpringMVC的大脑，主流程的工作都是在此完成的，梳理一下DispatcherServlet 代码。DispatcherServlet 本质是个Servlet，当配置了 load-on-startup 时，会在服务 器启动时就执行创建和执行初始化init方法，每次请求都会执行service方法 
+
+DispatcherServlet 的初始化主要做了两件事： 
+
+- 获得了一个 SpringMVC 的 ApplicationContext容器； 
+- 注册了 SpringMVC的 九大组件。
+
+<br>
+
+**DispatcherServlet 的简单继承图**
+
+![image-20251119155517407](Spring.assets/image-20251119155517407.png)
+
+<br>
+
+**SpringMVC 的ApplicationContext容器创建时机**
+
+Servlet 规范的 `init(ServletConfig config)` 方法经过子类重写 ，最终会调用 `FrameworkServlet` 抽象类的`initWebApplicationContext()` 方法，该方法中最终获得 一个根 Spring容器（Spring产生的），一个子Spring容器（SpringMVC产生的）。
+
+HttpServletBean 的初始化方法
+
+```java
+public final void init() throws ServletException {
+    this.initServletBean();
+}
+```
+
+FrameworkServlet的initServletBean方法
+
+```java
+protected final void initServletBean() throws ServletException {
+    this.webApplicationContext = this.initWebApplicationContext();//初始化ApplicationContext
+    this.initFrameworkServlet();//模板设计模式，供子类覆盖实现，但是子类DispatcherServlet没做使用
+}
+```
 
 
 
+<br>
 
+在initWebApplicationContext方法中体现的父子容器的逻辑关系
 
+```java
+//初始化ApplicationContext是一个及其关键的代码
+protected WebApplicationContext initWebApplicationContext() {
+    //获得根容器，其实就是通过ContextLoaderListener创建的ApplicationContext
+    //如果配置了ContextLoaderListener则获得根容器，没配置获得的是null
+    WebApplicationContext rootContext =
+    WebApplicationContextUtils.getWebApplicationContext(this.getServletContext());
+    
+    //定义SpringMVC产生的ApplicationContext子容器
+    WebApplicationContext wac = null;
+    if (wac == null) {
+        //==>创建SpringMVC的子容器，创建同时将Spring的创建的rootContext传递了过去
+        wac = this.createWebApplicationContext(rootContext);
+    }
+    
+    //将SpringMVC产生的ApplicationContext子容器存储到ServletContext域中
+    //key名是：org.springframework.web.servlet.FrameworkServlet.CONTEXT.DispatcherServlet
+    if (this.publishContext) {
+        String attrName = this.getServletContextAttributeName();
+        this.getServletContext().setAttribute(attrName, wac);
+    }
+}
+```
 
+<br>
 
+跟进创建子容器的源码
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+```java
+protected WebApplicationContext createWebApplicationContext(@Nullable ApplicationContext parent) {
+    //实例化子容器ApplicationContext
+    ConfigurableWebApplicationContext wac =
+    (ConfigurableWebApplicationContext)BeanUtils.instantiateClass(contextClass);
+    
+    //设置传递过来的ContextLoaderListener的rootContext为父容器
+    wac.setParent(parent);
+    
+    //获得web.xml配置的classpath:spring-mvc.xml
+    String configLocation = this.getContextConfigLocation();
+    
+    if (configLocation != null) {
+        //为子容器设置配置加载路径
+        wac.setConfigLocation(configLocation);
+    }
+    
+    //初始化子容器(就是加载spring-mvc.xml配置的Bean)
+    this.configureAndRefreshWebApplicationContext(wac);
+    return wac;
+}
+```
 
 
 
